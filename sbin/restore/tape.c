@@ -77,6 +77,7 @@ __RCSID("$NetBSD: tape.c,v 1.76 2025/12/26 09:49:35 nia Exp $");
 static u_int32_t fssize = MAXBSIZE;
 static int	mt = -1;
 static int	pipein = 0;
+static int	filein = 0;
 static char	magtape[BUFSIZ];
 static int	blkcnt;
 static int	numtrec;
@@ -262,6 +263,16 @@ setinput(const char *source)
 			}
 		}
 		pipein++;
+	} else {
+		/*
+		 * Input from a regular file may deliver short reads
+		 * (e.g. a dump file on a network file system), so the
+		 * tape blocking discipline must not be assumed there.
+		 */
+		struct stat stbuf;
+
+		if (stat(source, &stbuf) == 0 && S_ISREG(stbuf.st_mode))
+			filein++;
 	}
 	(void) strcpy(magtape, source);
 }
@@ -311,7 +322,7 @@ setup(void)
 	volno = 1;
 	setdumpnum();
 	FLUSHTAPEBUF();
-	if (!pipein && !bflag)
+	if (!pipein && !bflag && !filein)
 		findtapeblksize();
 	if (gethead(&spcl) == FAIL) {
 		blkcnt--; /* push back this block */
@@ -324,7 +335,7 @@ setup(void)
 		}
 		fprintf(stderr, "Converting to new file system format.\n");
 	}
-	if (pipein) {
+	if (pipein || filein) {
 		endoftapemark.s_spcl.c_magic = cvtflag ? OFS_MAGIC :
 		    FS_UFS2_MAGIC;
 		endoftapemark.s_spcl.c_type = TS_END;
@@ -394,16 +405,17 @@ getvol(int nextvol)
 		tapesread = 0;
 		gettingfile = 0;
 	}
-	if (pipein) {
+	if (pipein || filein) {
 		if (nextvol != 1)
-			panic("Changing volumes on pipe input?\n");
+			panic("Changing volumes on %s input?\n",
+			    filein ? "file" : "pipe");
 		if (volno == 1)
 			return;
 		goto gethdr;
 	}
 	savecnt = blksread;
 again:
-	if (pipein)
+	if (pipein || filein)
 		exit(1); /* pipes do not get a second chance */
 	if (command == 'R' || command == 'r' || curfile.action != SKIP) {
 		newvol = nextvol;
@@ -1294,17 +1306,17 @@ getmore:
 	 * Check for mid-tape short read error.
 	 * If found, skip rest of buffer and start with the next.
 	 */
-	if (!pipein && numtrec < ntrec && i > 0) {
+	if (!pipein && !filein && numtrec < ntrec && i > 0) {
 		dprintf(stdout, "mid-media short read error.\n");
 		numtrec = ntrec;
 	}
 	/*
 	 * Handle partial block read.
 	 */
-	if (pipein && i == 0 && rd > 0)
+	if ((pipein || filein) && i == 0 && rd > 0)
 		i = rd;
 	else if (i > 0 && i != ntrec * TP_BSIZE) {
-		if (pipein) {
+		if (pipein || filein) {
 			rd += i;
 			cnt -= i;
 			if (cnt > 0)
@@ -1363,7 +1375,7 @@ getmore:
 	 */
 	if (i == 0) {
 		vprintf(stdout, "End-of-tape encountered\n");
-		if (!pipein) {
+		if (!pipein && !filein) {
 			newvol = volno + 1;
 			volno = 0;
 			numtrec = 0;
